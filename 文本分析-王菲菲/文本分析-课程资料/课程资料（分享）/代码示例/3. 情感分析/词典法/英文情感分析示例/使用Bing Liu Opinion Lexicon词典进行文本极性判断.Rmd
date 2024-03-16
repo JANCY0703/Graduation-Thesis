@@ -1,0 +1,144 @@
+---
+title: "示例1_使用Bing Liu Opinion Lexicon词典进行文本极性判断"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+editor_options: 
+  chunk_output_type: console
+---
+
+#预处理
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+```
+
+##1.1 安装R包
+```{r}
+library("quanteda")
+library("textstem")
+library("qdap")
+library("jiebaR")
+library("wordcloud2")
+library("RColorBrewer")
+```
+
+##1.2 读入并提取文本数据
+```{r}
+movie <-readxl::read_xlsx("C:/Users/LEI/Desktop/PG/movie reviews.xlsx") #读入xlsx文件
+kable(movie[1,]) #查看第一行，发现评论在“review”列
+review_ori <- movie[which(movie$`film name`=="Ant-Man"),]$review #将电影“Ant-Man”的评论保存到review变量中
+```
+
+##1.3 除去HTML标签
+```{r}
+review <- review_ori
+for (i in 1:length(review)){
+  review[i] <- gsub("<.*?>","",review[i]) #除去<>包围的关键词
+  review[i] <- gsub("Â.*","",review[i]) #除去特殊符号Â
+  review[i] <- gsub("Ã.*","",review[i]) #除去特殊符号Ã
+}
+```
+
+##1.4 词形还原
+```{r}
+review[1] #查看词形还原前的第一条评论
+review <- lemmatize_strings(review) #实现词形还原
+review[1] #查看词形还原后的第一条评论
+```
+
+##1.5 分词
+```{r}
+review <- quanteda::tokens(review) #实现分词
+review[1] #查看分词后的第一条评论
+class(review) #查看分词后的变量类型
+```
+
+##1.6 文本数据清洗
+
+###1.6.1 使用tokens()进行清洗
+```{r}
+#library(RcppPa)
+review <- quanteda::tokens(review,remove_punct = TRUE,remove_symbols = TRUE,remove_numbers = TRUE,remove_url = TRUE,remove_separators = TRUE) #去除标点、符号、数字、url网址和分隔符
+```
+
+###1.6.2 去掉专有名词
+专有名词list下载网址：
+https://onlymyenglish.com/proper-noun-list/
+```{r}
+propernames <-readLines("C:/Users/LEI/Desktop/PG/propernames.txt") #读入专有名词表
+review <- quanteda::tokens_remove(review,propernames) #去掉专有名词
+```
+
+##1.7 统一小写
+```{r}
+review <- quanteda::tokens_tolower(review) #统一小写
+review[1] #查看统一小写后的第一条评论
+```
+
+##1.8 去掉常用或罕见的词
+
+###1.8.1 去掉停用词
+```{r}
+review1 <- tokens_remove(review,stopwords()) #去掉停用词
+stopwords(language = "en") #查看停用词表
+```
+
+##1.9 检查拼写
+```{r}
+review <- review1 #此时假设上一步采用了去掉停用词的方法
+chreview <- unlist(review) #将review转为character类型
+ck <- check_spelling(chreview) #检查拼写
+#ck$suggestion #查看建议
+review <- tokens_remove(review,ck$not.found) #去掉拼写错误的词
+```
+
+#2.使用Bing Liu Opinion Lexicon词典进行文本极性判断
+
+```{r}
+#转化为list
+review_list <- as.list(review)
+#词典
+#negative.words
+#positive.words
+negative.words <- readLines("C:/Users/LEI/Desktop/PG/negative-words.txt")
+positive.words <- readLines("C:/Users/LEI/Desktop/PG/positive-words.txt")
+
+#消极词语的词频
+N_review <- sapply(review_list, function(x) sum(x %in% negative.words))
+#积极词语的词频
+P_review <- sapply(review_list, function(x) sum(x %in% positive.words))
+#计算情感得分
+V_review <- (P_review-N_review)/(P_review+N_review)
+polar_review <- NULL
+for(i in 1:length(N_review)){
+  if(N_review[i] > P_review[i]){
+    polar_review[i] <- "负向"
+  }
+  else if(N_review[i] < P_review[i]){
+    polar_review[i] <- "正向"
+  }
+  else{
+    polar_review[i] <- "中性"
+  }
+}
+#文本极性分析的结果，包括每条评论的积极和消极情感的词频、情感得分、文本极性
+polar_review_df <- data.frame(review=review_ori, N=N_review, P=P_review, V=V_review,polar = polar_review)
+
+#写入csv中
+write.csv(polar_review_df, "C:/Users/LEI/Desktop/PG/polar_review.csv")
+```
+
+
+

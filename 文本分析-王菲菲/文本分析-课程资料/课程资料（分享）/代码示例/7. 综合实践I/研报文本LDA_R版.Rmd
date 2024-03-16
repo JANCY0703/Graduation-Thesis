@@ -1,0 +1,285 @@
+---
+title: "券商研报文本LDA代码示例"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::html_clean:
+    highlight: kate
+---
+```{r setup, include=FALSE}
+## Global options
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+
+```{r,include=FALSE}
+library(readxl)
+library(tm)
+library(topicmodels)
+library(quanteda)
+library(stopwords)
+library(knitr)
+library(kableExtra)
+library(jiebaR)
+```
+
+# 导入数据
+```{r}
+data <- read_xlsx("个股研报抽样.xlsx")
+```
+
+# 预处理
+```{r warning=FALSE}
+corpus1 <- corpus(data, text_field = "正文")
+```
+## 文本预处理
+
+### 试试jieba
+```{r}
+#jieba引擎
+engine<-worker(user = "dict.txt",
+  stop_word = "chineseStopWords.txt", write = T, qmax = 20, topn = 5,
+  encoding = "UTF-8", detect = T, symbol = F, lines = 1e+05,
+  )
+
+my_stopwords <- read.table("chineseStopWords.txt")
+#去除停用词
+
+#只保留汉字的函数
+remove_non_chinese <- function(text) {
+  # 使用正则表达式只保留汉字字符
+  clean_text <- gsub("^[\u4e00-\u9fa5]{0,}$", "", text, perl = TRUE)
+  no_numbers <- gsub("\\d+", "", clean_text)#去掉数字字符串
+  no_ens <- gsub("[a-zA-Z]+","",no_numbers)
+  final <- no_ens[no_ens!=""]
+  return(final)
+}
+
+#去除数字字符串的函数
+
+
+#定义分词函数
+pretty_cut <- function(text) {
+    #只保留汉字
+  words <- remove_non_chinese(text)
+    # Tokenize the Chinese text
+  cut_list <- segment(words,engine)
+  
+  # Remove stopwords
+  cut_list <- cut_list[!cut_list %in% my_stopwords]
+  
+  #过滤掉一个字的词
+  cut_list <- subset(cut_list,nchar(as.character(cut_list))>1)
+  
+  #
+  return(cut_list)
+}
+```
+
+```{r}
+df_main <- data.frame(股票代码 = data$股票代码, 正文 = data$正文)
+```
+
+```{r}
+df_main$cut <- lapply(df_main$正文, pretty_cut)
+```
+
+```{r}
+tokens <- tokens(df_main$cut)
+dtm <- dfm(tokens)
+```
+
+## LDA建模
+```{r}
+lda <- LDA(dtm, k = 8)
+```
+
+## 查看主题关键字并绘制词云图
+```{r}
+# 查看每个主题的前20个关键词
+# terms(lda1, 20) 
+kable(terms(lda, 10))
+```
+
+```{r}
+library(tidytext)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+# 提取主题词语分布(beta)
+topics1 <- tidy(lda, matrix="beta")
+# 提取每个主题中概率值最大的前十个值，并且按概率值降序排序
+top_terms1 <- topics1 %>% # 将topics1的数据使用管道函数传给group_by
+  group_by(topic) %>%  # 按照主题进行分组汇总
+  top_n(10, beta) %>% # 每个主题保留前10个词
+  ungroup() %>%   # 取消分组
+  arrange(topic, -beta) #对每个主题的关键词按照相应概率值降序排列
+
+#head(top_terms1,20) # 查看前20个数据
+# 绘制每个主题和提取的10个出现概率值最大的主题词的条形图
+plot_terms <- top_terms1 %>%
+  mutate(term = reorder(term, beta)) %>% # term按照beta数值降序排列
+  ggplot(aes(term, beta, fill = factor(topic))) + # 设置绘图的变量为term和beta，不同的主题设置不同的颜色
+  geom_col(show.legend = FALSE) + # 设置图例不显示
+  facet_wrap(~ topic, scales = "free") + # 按照主题分成不同的子图，通过参数scales来控制面板位置标度的固定和自由，x 和 y 的标度都可变
+  coord_flip()+ # 把x轴和y轴互换，从垂直条形图变为水平条形图
+  theme_bw()
+
+plot_terms
+```
+
+# 计算KL散度，选择创新主题
+```{r}
+#读取参考文献
+ref_df <- read.csv("ref_df.csv")
+```
+
+```{r}
+#合并参考文本内容
+ref_content <- paste(ref_df$content,collapse = "")
+```
+
+```{r}
+#jieba引擎
+engine<-worker(user = "dict.txt",
+  stop_word = "chineseStopWords.txt", write = T, qmax = 20, topn = 5,
+  encoding = "UTF-8", detect = T, symbol = F, lines = 1e+05,
+  )
+#参考文本分词
+ref_cut <- pretty_cut(ref_content)
+```
+
+```{r}
+#参考文本词频
+ref_freq <- freq(ref_cut)
+ref_freq <- ref_freq[order(ref_freq$freq, decreasing = TRUE), ]
+ref_freq$freq <- (ref_freq$freq)/sum(ref_freq$freq)
+head(ref_freq,10)
+```
+```{r}
+# 获得lda模型的主题词语分布和文档主题分布
+tmResult1 <- modeltools::posterior(lda, )
+```
+
+
+```{r}
+KLd <- c()
+#考虑每个主题的前num_consider个词
+num_consider <- 100
+#计算与每个主题的KL散度
+for (i in 1:8){
+  topic <- i
+  # 选出主题的前num个关键词及其概率
+  top_terms <- sort(tmResult1$terms[topic,], decreasing=TRUE)[1:num_consider]
+  # 提取前50个关键词
+  words <- names(top_terms)
+  # 提取前num个关键词的概率
+  probabilities <- sort(tmResult1$terms[topic,], decreasing=TRUE)[1:num_consider]
+  
+  df_topic <- data.frame(char = unlist(words),pro =unlist(probabilities))
+  #寻找相同词
+  df_kl_cal <- merge(ref_freq,df_topic,by="char")
+  #计算KL散度
+  kl <- 0.5*sum((df_kl_cal$freq)*log(df_kl_cal$freq/df_kl_cal$pro)+(df_kl_cal$pro)*log(df_kl_cal$pro/df_kl_cal$freq))
+  
+  KLd <- c(KLd,kl)
+}
+
+KLd
+
+```
+第6个主题的KL散度最小，选择第6个主题
+
+# 计算文档创新得分
+```{r}
+# 提取文档-主题分布(gamma)
+topics_doc1 <- tidy(lda, matrix="gamma")
+# 提取主题1的文档-主题分布
+topics_doc1_1 <- topics_doc1[topics_doc1$topic==6,]
+
+#与股票代码列合并
+score_text <- data.frame(ID=df_main$股票代码,score_text=topics_doc1_1$gamma)
+
+```
+
+```{r}
+#公司层面汇总
+score_ID <- score_text %>%
+  group_by(ID) %>%
+  summarize(score = mean(score_text))
+```
+
+```{r}
+#画个直方图
+ggplot(data = score_ID,aes(x = score)) +
+  geom_histogram(bins = 50, fill = "blue", color = "black") +
+  labs(x = "Score", y = "Frequency") +
+  ggtitle("Distribution of Scores")
+```
+
+
+# 补充其他公司信息
+```{r}
+#借用一下整理好的公司数据
+info <- read.csv("小样本公司数据.csv",header = T)
+```
+
+# 产业分析
+```{r}
+colnames(info)[9] <- "RD"
+```
+
+```{r}
+score_industry <- info %>%
+  group_by(证监会行业名称) %>%
+  summarize(score = mean(score),RD = mean(RD))
+
+score_industry <- score_industry[order(score_industry$score,decreasing = T),]
+
+head(score_industry,10)
+```
+
+
+# 有无专利、有无研发分组
+```{r}
+#专利
+info_pantent_1 <- subset(info,info$专利数量!=0)
+info_pantent_0 <- subset(info,info$专利数量==0)
+
+#研发
+info_RD_1 <- subset(info,info$RD!=0)
+info_RD_0 <- subset(info,info$RD==0)
+```
+
+
+# 回归建模
+```{r}
+info_reg <- info[,c(28,2,6,9,13,16,19,21,22,26,27)]
+```
+
+```{r}
+#创新变量
+txt_innov <- as.numeric(info_reg$score)
+
+patents <- as.numeric(info_reg$专利数量)
+#patents[is.nan(patents)]=0
+
+RD <- as.numeric(info_reg$RD)
+#RD[is.nan(RD)]=0
+#绩效变量
+ROE <- as.numeric(info_reg$净资产收益率ROE.摊薄....)
+#log_ROE = log(1+ROE)
+Growth <- as.numeric((info_reg$营业收入增长率...))
+#log_Growth = log(1+Growth)
+Q <- as.numeric(info_reg$log_Q_2022)
+#控制变量
+ROA <- as.numeric((info_reg$总资产报酬率.ROA....))
+Lev <- as.numeric(info_reg$资产负债率...)
+Z <- as.numeric(info_reg$Z指数)
+Assets <- as.numeric(info_reg$log_Asset)
+```
+
+```{r}
+model_0_1 <- lm(Q~txt_innov+ROA+Lev+Z+Assets)
+summary(model_0_1)
+```
+

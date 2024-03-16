@@ -1,0 +1,219 @@
+---
+title: "Deep Learning for Chinese Text Analysis"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::downcute:
+    self_contained: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+library(jiebaR)
+library(tensorflow)
+library(keras)
+library(reticulate)
+library(dplyr)
+library(ggplot2)
+library(purrr)
+
+## Global options
+options(max.print="1e5")
+opts_chunk$set(echo=T,
+	             cache=FALSE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               error = F,
+               engine.path = list(
+  python = 'C:\\Users\\25529\\anaconda3\\python.exe')
+)
+knitr::knit_engines$set(python = reticulate::eng_python)
+opts_knit$set(width=75)
+
+colors <- c('#f3a683', 
+            '#f7d794', 
+            '#778beb', 
+            '#e77f67', 
+            '#cf6a87', 
+            '#f19066', 
+            '#f5cd79', 
+            '#546de5', 
+            '#e15f41', 
+            '#c44569')
+```
+
+# RNN模型
+
+## 数据初始化
+```{r}
+# 首先读入数据labeled-corpus-sampled
+data <- read.csv2("./labeled-corpus-sampled.csv", header = TRUE, sep = ",", encoding = "UTF-8")
+
+
+# 80%划分为训练集，20%为测试集
+SIZE <- length(data[, 1])
+TRAINING_SIZE <- SIZE * 0.8
+TESTING_SIZE <- SIZE - TRAINING_SIZE
+
+# 中文分词
+wk = worker()
+data <- data %>% mutate(text_process = sapply(text, function(x) paste(wk[x], collapse = " ")))
+
+# 划分训练集与测试集
+training_id <- sample(SIZE, TRAINING_SIZE, replace = FALSE)
+training <- data[training_id, ]
+testing <- data[-training_id, ]
+```
+
+
+## 模型训练
+```{r}
+#文本的词数分布
+data$text_process %>%
+    strsplit(" ") %>%
+    sapply(length) %>%
+    summary
+
+# 设置相关参数
+num_words <- 5000
+max_length <- 40
+batch_size <- 16
+
+# 文本向量化，给出某一个向量的index
+## 这里需要设置max_tokens，系统会选择前max_tokens个词频最高的词语来进行编号
+text_vectorization <- layer_text_vectorization(
+  max_tokens = num_words,
+  output_sequence_length = max_length,
+)
+
+text_vectorization %>%
+  adapt(data$text_process)
+
+vocabulary <- get_vocabulary(text_vectorization)
+
+# 这里可以查看第一条文本的向量化情况
+text_vectorization(matrix(data$text_process[1], ncol = 1))
+
+input <- layer_input(shape = c(1), dtype = "string")
+
+output <- input %>%
+  # 文本向量化给出词语的index（one-hot编码）
+  ## 对于频率在前num_words以后的词语，使用0统一作为其index
+  text_vectorization() %>% 
+  # 在第一步的基础上，进行词嵌入，这里使用的是keras内置的词嵌入方法
+  ## input_dim为输入层，维度为num_words+1，加1是指0这一index是有意义的
+  ## output_dim为输出层的维度，即转化为分布式词向量的维度
+  layer_embedding(input_dim = num_words+1, output_dim = 128) %>%
+  # 调用普通的RNN模型layer_simple_rnn。RNN的调参具有一定的难度，需要不断调整以获得最优的参数
+  ## 在这里我们设置输出空间的维数为64
+  ## dropout和recurrent_dropout指的是在进行线性变化（左乘W和U）是需要drop掉的比例，这有利于模型的训练，具体的理论：
+  ### 见参考文献Gal Y ,  Ghahramani Z . A Theoretically Grounded Application of. Statistics, 2015:285-290.
+    layer_simple_rnn(units = 32, dropout = 0.4, recurrent_dropout = 0.2) %>%
+    layer_dense(units = 1, activation = "sigmoid")
+
+model <- keras_model(input, output)
+
+# 编译模型
+model %>%
+    compile(loss = 'binary_crossentropy', optimizer = "adam", metrics = c("accuracy"))
+
+# 训练模型
+history <- model %>%
+    fit(training$text_process, as.numeric(training$label == "1.0"), epochs = 10, batch_size = batch_size, verbose = 2,
+        validation_data = list(testing$text_process, as.numeric(testing$label == "1.0")))
+
+results <- model %>%
+    evaluate(testing$text_process, as.numeric(testing$label == "1.0"), batch_size = batch_size)
+
+plot(history)
+```
+
+
+# LSTM模型
+
+```{r}
+input <- layer_input(shape = c(1), dtype = "string")
+
+output <- input %>%
+  # 文本向量化给出词语的index（one-hot编码）
+  ## 对于频率在前num_words以后的词语，使用0统一作为其index
+  text_vectorization() %>% 
+  # 在第一步的基础上，进行词嵌入，这里使用的是keras内置的词嵌入方法
+  ## input_dim为输入层，维度为num_words+1，加1是指0这一index是有意义的
+  ## output_dim为输出层的维度，即转化为分布式词向量的维度
+  layer_embedding(input_dim = num_words+1, output_dim = 128) %>%
+  # 调用LSTM模型layer_lstm。
+  ## 在这里我们设置输出空间的维数为32
+  layer_lstm(units = 32, dropout = 0.4, recurrent_dropout = 0.2) %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+model <- keras_model(input, output)
+
+# 编译模型
+model %>%
+    compile(loss = "binary_crossentropy", optimizer = "adam", metrics = c("accuracy"))
+
+# 训练模型
+history <- model %>%
+    fit(training$text_process, as.numeric(training$label == "1.0"), epochs = 10, batch_size = batch_size, verbose = 2,
+        validation_data = list(testing$text_process, as.numeric(testing$label == "1.0")))
+
+results <- model %>%
+    evaluate(testing$text_process, as.numeric(testing$label == "1.0"), batch_size = batch_size)
+
+plot(history)
+```
+
+
+
+# CNN模型
+
+```{r}
+hidden_dims <- 32
+filters <- 250
+kernel_size <- 3
+batch_size <- 1
+embedding_dims <- 128
+epochs <- 3
+
+input <- layer_input(shape = c(1), dtype = "string")
+
+output <- input %>%
+  text_vectorization() %>%
+  layer_embedding(input_dim = num_words + 1, output_dim = 128) %>%
+  # 加入一维卷积层，共设置filters个卷积核，其每一个卷积核的串口大小，即h为3。采用relu激活函数
+  layer_conv_1d(filters, kernel_size, padding = "valid", activation = "relu", strides = 1) %>%
+  # 根据讨论，进行最大池化
+  layer_global_max_pooling_1d() %>%
+  # 接下来加入全连接层，并进行一定比例的dropout
+  layer_dense(hidden_dims) %>%
+  layer_dropout(0.2) %>%
+  layer_activation("relu") %>%
+  layer_dense(1) %>%  
+  layer_activation("sigmoid")
+
+model <- keras_model(input, output)
+
+# 编译模型
+model %>%
+    compile(loss = "binary_crossentropy", optimizer = 'adam', metrics = c("accuracy"))
+
+# 训练模型
+history <- model %>%
+    fit(training$text_process, as.numeric(training$label == "1.0"), batch_size = batch_size, epochs = epochs, verbose = 2, 
+        validation_data = list(testing$text_process, as.numeric(testing$label == "1.0")))
+
+results <- model %>%
+    evaluate(testing$text_process, as.numeric(testing$label == "1.0"), batch_size = batch_size)
+
+plot(history)
+```
+
+
+
+
+
